@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Автосервис Магнат</title>
+<script src="/sdk.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;user-select:none;-webkit-user-select:none;font-family:system-ui,-apple-system,sans-serif}
+html,body{width:100%;height:100%;overflow:hidden;background:#1a1d24;touch-action:none}
+canvas{display:block;width:100%;height:100%}
+.hud{position:fixed;top:14px;left:14px;right:14px;display:flex;justify-content:space-between;align-items:center;pointer-events:none;z-index:10}
+.badge{background:rgba(15,18,24,.88);border:2px solid #38bdf8;color:#fff;padding:8px 16px;border-radius:16px;font-size:18px;font-weight:800;display:flex;align-items:center;gap:8px;box-shadow:0 6px 18px rgba(0,0,0,.4)}
+.ad-btn{pointer-events:auto;background:linear-gradient(135deg,#f59e0b,#eab308);color:#000;border:none;padding:10px 16px;border-radius:16px;font-size:14px;font-weight:800;cursor:pointer;box-shadow:0 6px 18px rgba(245,158,11,.35);display:flex;align-items:center;gap:6px;transition:transform .1s}
+.ad-btn:active{transform:scale(.94)}
+.hint{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,.65);color:#cbd5e1;padding:6px 14px;border-radius:12px;font-size:12px;pointer-events:none;white-space:nowrap}
+</style>
+</head>
+<body oncontextmenu="return false;">
+<div class="hud">
+    <div class="badge">💵 <span id="money">100</span></div>
+    <button class="ad-btn" onclick="watchRewardAd()">📺 Инкассатор (+250$)</button>
+</div>
+<div class="hint">Управление: WASD / Стрелки или зажми палец на экране</div>
+<canvas id="game"></canvas>
+<script>
+let ysdk = null;
+if (window.YaGames) {
+    YaGames.init().then(sdk => {
+        ysdk = sdk;
+        if (ysdk.features && ysdk.features.LoadingAPI) ysdk.features.LoadingAPI.ready();
+    }).catch(() => {});
+}
+
+function watchRewardAd() {
+    const giveCash = () => { state.money += 250; save(); };
+    if (ysdk && ysdk.adv) {
+        ysdk.adv.showRewardedVideo({ callbacks: { onRewarded: giveCash } });
+    } else {
+        giveCash();
+    }
+}
+
+const cv = document.getElementById('game');
+const ctx = cv.getContext('2d');
+let W = cv.width = window.innerWidth;
+let H = cv.height = window.innerHeight;
+window.addEventListener('resize', () => { W = cv.width = window.innerWidth; H = cv.height = window.innerHeight; });
+
+let saved = JSON.parse(localStorage.getItem('ya_autoservice_v1')) || {};
+let state = {
+    money: saved.money !== undefined ? saved.money : 100,
+    bay2Unlocked: saved.bay2Unlocked || false,
+    botUnlocked: saved.botUnlocked || false,
+    speedLvl: saved.speedLvl || 1
+};
+function save() {
+    localStorage.setItem('ya_autoservice_v1', JSON.stringify(state));
+    document.getElementById('money').innerText = Math.floor(state.money);
+}
+save();
+
+const player = { x: W / 2, y: H / 2, r: 18, carry: null };
+const bot = { x: W / 2 + 60, y: H / 2 + 40, r: 16, carry: null };
+const keys = {};
+let joy = { active: false, sx: 0, sy: 0, dx: 0, dy: 0 };
+
+window.addEventListener('keydown', e => keys[e.code] = true);
+window.addEventListener('keyup', e => keys[e.code] = false);
+cv.addEventListener('pointerdown', e => { joy = { active: true, sx: e.clientX, sy: e.clientY, dx: 0, dy: 0 }; });
+window.addEventListener('pointermove', e => {
+    if (!joy.active) return;
+    const vx = e.clientX - joy.sx, vy = e.clientY - joy.sy;
+    const len = Math.hypot(vx, vy);
+    if (len > 5) { joy.dx = vx / len; joy.dy = vy / len; }
+});
+window.addEventListener('pointerup', () => { joy.active = false; joy.dx = 0; joy.dy = 0; });
+
+const shelves = [
+    { type: 'wheel', icon: '🛞', label: 'Колеса', rx: -180, ry: -120 },
+    { type: 'oil', icon: '🛢️', label: 'Масло', rx: -180, ry: 80 }
+];
+const bays = [
+    { id: 0, rx: 110, ry: -110, car: null, timer: 0 },
+    { id: 1, rx: 110, ry: 90, car: null, timer: 0 }
+];
+const pads = [
+    { id: 'bay2', label: 'Пост №2', cost: 200, rx: 110, ry: 90, bought: () => state.bay2Unlocked, buy: () => { state.bay2Unlocked = true; if (ysdk?.adv) ysdk.adv.showFullscreenAdv(); } },
+    { id: 'bot', label: 'Механик-бот', cost: 350, rx: -20, ry: 150, bought: () => state.botUnlocked, buy: () => { state.botUnlocked = true; } },
+    { id: 'speed', label: 'Кроссовки +', cost: 150, rx: -20, ry: -160, bought: () => state.speedLvl >= 4, buy: () => { state.speedLvl++; } }
+];
+let cashPiles = [];
+let padProgress = {};
+
+function spawnCar(bay) {
+    const needs = ['wheel', 'oil'];
+    const colors = ['#ef4444', '#3b82f6', '#10b981', '#a855f7', '#f97316'];
+    bay.car = {
+        need: needs[Math.floor(Math.random() * needs.length)],
+        color: colors[Math.floor(Math.random() * colors.length)],
+        progress: 0,
+        offsetX: 250
+    };
+}
+
+function update(dt) {
+    const cx = W / 2, cy = H / 2;
+    let mx = 0, my = 0;
+    if (keys['KeyW'] || keys['ArrowUp']) my -= 1;
+    if (keys['KeyS'] || keys['ArrowDown']) my += 1;
+    if (keys['KeyA'] || keys['ArrowLeft']) mx -= 1;
+    if (keys['KeyD'] || keys['ArrowRight']) mx += 1;
+    if (joy.active) { mx = joy.dx; my = joy.dy; }
+    const mLen = Math.hypot(mx, my);
+    if (mLen > 0) {
+        const spd = (190 + state.speedLvl * 35) * dt;
+        player.x = Math.max(30, Math.min(W - 30, player.x + (mx / mLen) * spd));
+        player.y = Math.max(60, Math.min(H - 30, player.y + (my / mLen) * spd));
+    }
+
+    shelves.forEach(s => {
+        if (Math.hypot(player.x - (cx + s.rx), player.y - (cy + s.ry)) < 48) player.carry = s.type;
+    });
+
+    bays.forEach((b, idx) => {
+        if (idx === 1 && !state.bay2Unlocked) return;
+        if (!b.car) {
+            b.timer += dt;
+            if (b.timer > 1.5) { spawnCar(b); b.timer = 0; }
+        } else {
+            if (b.car.offsetX > 0) b.car.offsetX = Math.max(0, b.car.offsetX - 220 * dt);
+            const bx = cx + b.rx, by = cy + b.ry;
+            const nearPlayer = Math.hypot(player.x - bx, player.y - by) < 68 && player.carry === b.car.need;
+            const nearBot = state.botUnlocked && Math.hypot(bot.x - bx, bot.y - by) < 68 && bot.carry === b.car.need;
+            if ((nearPlayer || nearBot) && b.car.offsetX === 0) {
+                b.car.progress += dt * 0.85;
+                if (b.car.progress >= 1) {
+                    if (nearPlayer) player.carry = null;
+                    if (nearBot) bot.carry = null;
+                    for (let i = 0; i < 3; i++) {
+                        cashPiles.push({ x: bx - 40 + Math.random() * 60, y: by + 35 + Math.random() * 25, val: 25 });
+                    }
+                    b.car = null;
+                }
+            }
+        }
+    });
+
+    if (state.botUnlocked) {
+        let targetBay = bays.find((b, i) => (i === 0 || state.bay2Unlocked) && b.car && b.car.offsetX === 0);
+        let tx = cx - 20, ty = cy + 80;
+        if (targetBay) {
+            if (bot.carry !== targetBay.car.need) {
+                const sh = shelves.find(s => s.type === targetBay.car.need);
+                tx = cx + sh.rx; ty = cy + sh.ry;
+                if (Math.hypot(bot.x - tx, bot.y - ty) < 42) bot.carry = sh.type;
+            } else {
+                tx = cx + targetBay.rx; ty = cy + targetBay.ry;
+            }
+        }
+        const bdx = tx - bot.x, bdy = ty - bot.y, bl = Math.hypot(bdx, bdy);
+        if (bl > 6) { bot.x += (bdx / bl) * 155 * dt; bot.y += (bdy / bl) * 155 * dt; }
+    }
+
+    cashPiles = cashPiles.filter(p => {
+        if (Math.hypot(player.x - p.x, player.y - p.y) < 42) {
+            state.money += p.val; save(); return false;
+        }
+        return true;
+    });
+
+    pads.forEach(pad => {
+        if (pad.bought()) return;
+        const px = cx + pad.rx, py = cy + pad.ry;
+        if (Math.hypot(player.x - px, player.y - py) < 46 && state.money >= pad.cost) {
+            padProgress[pad.id] = (padProgress[pad.id] || 0) + dt * 1.4;
+            if (padProgress[pad.id] >= 1) {
+                state.money -= pad.cost; pad.buy(); padProgress[pad.id] = 0; save();
+            }
+        } else {
+            padProgress[pad.id] = 0;
+        }
+    });
+}
+
+function draw() {
+    const cx = W / 2, cy = H / 2;
+    ctx.fillStyle = '#1e222b';
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.strokeStyle = 'rgba(255,255,255,0.04)';
+    ctx.lineWidth = 1;
+    for (let x = 0; x < W; x += 45) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke(); }
+    for (let y = 0; y < H; y += 45) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+
+    shelves.forEach(s => {
+        const sx = cx + s.rx, sy = cy + s.ry;
+        ctx.fillStyle = '#2b313e'; ctx.strokeStyle = '#38bdf8'; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.roundRect(sx - 34, sy - 34, 68, 68, 14); ctx.fill(); ctx.stroke();
+        ctx.font = '28px sans-serif'; ctx.textAlign = 'center'; ctx.fillText(s.icon, sx, sy + 6);
+        ctx.fillStyle = '#cbd5e1'; ctx.font = 'bold 11px sans-serif'; ctx.fillText(s.label, sx, sy + 26);
+    });
+
+    pads.forEach(pad => {
+        if (pad.bought()) return;
+        const px = cx + pad.rx, py = cy + pad.ry;
+        ctx.fillStyle = 'rgba(16, 185, 129, 0.14)'; ctx.strokeStyle = '#10b981'; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.roundRect(px - 42, py - 32, 84, 64, 14); ctx.fill(); ctx.stroke();
+        if (padProgress[pad.id] > 0) {
+            ctx.fillStyle = 'rgba(16, 185, 129, 0.45)';
+            ctx.fillRect(px - 40, py - 30, 80 * padProgress[pad.id], 60);
+        }
+        ctx.fillStyle = '#fff'; ctx.font = 'bold 11px sans-serif'; ctx.textAlign = 'center';
+        ctx.fillText(pad.label, px, py - 4);
+        ctx.fillStyle = '#fde047'; ctx.fillText(pad.cost + '$', px, py + 14);
+    });
+
+    bays.forEach((b, idx) => {
+        if (idx === 1 && !state.bay2Unlocked) return;
+        const bx = cx + b.rx, by = cy + b.ry;
+        ctx.strokeStyle = 'rgba(250, 204, 21, 0.5)'; ctx.setLineDash([6, 6]); ctx.lineWidth = 2;
+        ctx.strokeRect(bx - 52, by - 32, 104, 64); ctx.setLineDash([]);
+        if (b.car) {
+            const carX = bx + b.car.offsetX;
+            ctx.fillStyle = b.car.color;
+            ctx.beginPath(); ctx.roundRect(carX - 42, by - 22, 84, 44, 10); ctx.fill();
+            ctx.fillStyle = '#0f172a'; ctx.fillRect(carX - 18, by - 16, 36, 32);
+            if (b.car.offsetX === 0) {
+                ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(carX, by - 44, 16, 0, Math.PI * 2); ctx.fill();
+                ctx.font = '18px sans-serif'; ctx.fillText(b.car.need === 'wheel' ? '🛞' : '🛢️', carX, by - 38);
+                if (b.car.progress > 0) {
+                    ctx.fillStyle = '#22c55e'; ctx.fillRect(carX - 30, by + 28, 60 * b.car.progress, 6);
+                }
+            }
+        }
+    });
+
+    cashPiles.forEach(p => {
+        ctx.font = '20px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('💵', p.x, p.y);
+    });
+
+    const drawChar = (ch, color, hat) => {
+        ctx.fillStyle = color; ctx.beginPath(); ctx.arc(ch.x, ch.y, ch.r, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.stroke();
+        ctx.font = '14px sans-serif'; ctx.textAlign = 'center'; ctx.fillText(hat, ch.x, ch.y + 5);
+        if (ch.carry) {
+            ctx.font = '18px sans-serif'; ctx.fillText(ch.carry === 'wheel' ? '🛞' : '🛢️', ch.x + 16, ch.y - 14);
+        }
+    };
+    if (state.botUnlocked) drawChar(bot, '#f59e0b', '🤖');
+    drawChar(player, '#0ea5e9', '🧑‍🔧');
+
+    if (joy.active) {
+        ctx.strokeStyle = 'rgba(255,255,255,0.25)'; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(joy.sx, joy.sy, 35, 0, Math.PI * 2); ctx.stroke();
+    }
+}
+
+let last = performance.now();
+function loop(now) {
+const dt = Math.min(0.05, (now - last) / 1000);
+last = now;
+update(dt);
+draw();
+requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
